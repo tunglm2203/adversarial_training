@@ -178,9 +178,9 @@ def train(args, model, device, train_loader, optimizer, epoch, optimizer_clean_a
                             epsilon=args.epsilon,
                             perturb_steps=args.num_steps)
 
-        elif args.training_method == "Hybrid_single_bn_mse":
+        elif args.training_method == "default_cls":
             # calculate robust loss
-            loss = Hybrid_single_bn_mse(model=model,
+            loss = default_cls(model=model,
                             x_natural=data,
                             y=target,
                             optimizer=optimizer,
@@ -385,6 +385,29 @@ def Hybrid_single_bn(model,
     # alpha = 0
 
     loss = alpha*loss_natural + (1-alpha)*loss_adv
+    return loss
+
+
+def default_cls(model,
+                x_natural,
+                y,
+                optimizer,
+                step_size=0.003,
+                epsilon=0.031,
+                perturb_steps=10,
+                distance='l_inf'):
+    # define KL-loss
+    # criterion_kl = nn.KLDivLoss(size_average=False)
+
+    model.train()
+
+    # zero gradient
+    optimizer.zero_grad()
+
+    logits_natural = model(x_natural, "pgd")
+    loss_natural = F.cross_entropy(logits_natural, y)
+
+    loss = loss_natural
     return loss
 
 

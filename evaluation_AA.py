@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import torchvision
 import torch.optim as optim
 from torchvision import datasets, transforms
+from torch.autograd import Variable
 
 from models.wideresnet import *
 from models.resnet import *
@@ -21,6 +22,7 @@ import numpy as np
 # from madry import madry_loss, generate_adv
 # from attack_method.dual_bn_Madry_original_pgd_code_based import dual_bn_madry_loss, generate_adv
 # from attack_method.dual_bn_SameNetwork import dual_bn_madry_loss, generate_adv
+from tqdm import tqdm
 
 import wandb
 import torchattacks
@@ -73,6 +75,8 @@ parser.add_argument('--norm_layer', default='vanilla', choices=BN_LAYER_LIST, ty
 
 parser.add_argument('--test_pgd', action='store_true')
 parser.add_argument('--test_normal', action='store_true')
+parser.add_argument('--attack', type=str, default='linf-pgd')
+parser.add_argument('--architecture', default='resnet18', type=str, help='network')
 
 
 args = parser.parse_args()
@@ -232,12 +236,13 @@ def eval_autoattack(model, device, test_loader,epoch,optimizer, bn_name):
     correct = 0
     # change_bn_mode(model, bn_name)
 
-    autoattack = torchattacks.AutoAttack(model, eps=args.epsilon)
+    # autoattack = torchattacks.AutoAttack(model, eps=args.epsilon, norm="Linf")
+    autoattack = torchattacks.AutoAttack(model, eps=args.epsilon, norm="L2")
 
     total_tested = 0
 
     with torch.no_grad():
-        for data, target in test_loader:
+        for data, target in tqdm(test_loader):
             total_tested += data.size(0)
             data, target = data.to(device), target.to(device)
             # data_adv = generate_adv(model, data, target, optimizer, step_size=args.step_size, epsilon=args.epsilon, perturb_steps=20, beta=1, distance='l_inf', bn_name=bn_name)
@@ -274,7 +279,7 @@ def adjust_learning_rate(optimizer, epoch):
 def main():
     checkpoint_file = args.ckpt_dir
     print(checkpoint_file)
-    from models.resnet_multi_bn_for_test import multi_bn_resnet18, CrossTrainingBN_adv, CrossTrainingBN_all, CrossTrainingBN_clean
+    from models.resnet_multi_bn_for_test import multi_bn_resnet18, multi_bn_vq_resnet18
     from models.resnet_multi_bn_default_pgd import CrossTrainingBN_clean, CrossTrainingBN_adv, CrossTrainingBN_all, Disentangling_LP
 
 
@@ -308,8 +313,13 @@ def main():
     elif args.norm_layer == "Disentangling_LP":
         norm_layer = Disentangling_LP
 
+    if args.architecture == "resnet18":
+        model = multi_bn_resnet18(norm_layer=norm_layer, bn_names=["pgd", "normal"], num_classes=10).to(device)
+    elif args.architecture == "resnet18_vq_in":
+        model = multi_bn_vq_resnet18(norm_layer=norm_layer, bn_names=["pgd", "normal"], num_classes=10).to(device)
+    else:
+        raise NotImplementedError
 
-    model = multi_bn_resnet18(norm_layer=norm_layer, bn_names=["pgd", "normal"]).to(device)
     state_dict = torch.load(checkpoint_file)
 
     # import ipdb; ipdb.set_trace()
@@ -333,22 +343,21 @@ def main():
 
     if args.test_pgd:
 
-        seed(args.seed)
-        norm = 'Linf' if args.attack in ['fgsm', 'linf-pgd', 'linf-df'] else 'L2'
-        adversary = AutoAttack(model, norm=norm, eps=args.attack_eps, log_path=log_path, version=args.version, seed=args.seed)
-
-        if args.version == 'custom':
-            adversary.attacks_to_run = ['apgd-ce', 'apgd-t']
-            adversary.apgd.n_restarts = 1
-            adversary.apgd_targeted.n_restarts = 1
-
-        with torch.no_grad():
-            x_adv = adversary.run_standard_evaluation(x_test, y_test, bs=BATCH_SIZE_VALIDATION)
+        # seed(args.seed)
+        # norm = 'Linf' if args.attack in ['fgsm', 'linf-pgd', 'linf-df'] else 'L2'
+        # adversary = torchattacks.AutoAttack(model, norm=norm, eps=args.attack_eps, log_path=log_path, version=args.version, seed=args.seed)
+        #
+        # if args.version == 'custom':
+        #     adversary.attacks_to_run = ['apgd-ce', 'apgd-t']
+        #     adversary.apgd.n_restarts = 1
+        #     adversary.apgd_targeted.n_restarts = 1
+        #
+        # with torch.no_grad():
+        #     x_adv = adversary.run_standard_evaluation(x_test, y_test, bs=BATCH_SIZE_VALIDATION)
 
 
         model.forward_bn = "pgd"
         eval_test(model, device, test_loader, 0, bn_name="pgd")
-
         test_loss, test_accuracy = eval_autoattack(model, device, test_loader, 0, optimizer, "pgd")
         metrics["AA_loss"] = test_loss
         metrics["AA_acc"] = test_accuracy * 100

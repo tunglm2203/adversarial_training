@@ -223,12 +223,20 @@ class batch_norm_multiple(nn.Module):
 class ResNet(nn.Module):
     def __init__(self, block, layers, bn_names=["pgd", "normal"], num_classes=1000, zero_init_residual=False,
                  groups=1, width_per_group=64, replace_stride_with_dilation=None,
-                 norm_layer=None):
+                 norm_layer=None, vq_in=False):
         """
         :param bn_names: list, the name of bn that would be employed
         """
 
         super(ResNet, self).__init__()
+        self.vq_in = vq_in
+        if self.vq_in:
+            n_embeddings = 512
+            embedding_dim = 3
+            commitment_cost = 0.25
+            decay = 0.99
+            self.vq_in = VectorQuantizerEMA(n_embeddings, embedding_dim, commitment_cost, decay)
+
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
         self._norm_layer = norm_layer
@@ -320,6 +328,9 @@ class ResNet(nn.Module):
         # for auto attack. we need to change the default forward bn name, since we can not modify the original AA algorithm
         if self.forward_bn_name in ["pgd", "normal"]:
             bn_name = self.forward_bn_name
+        if self.vq_in:
+            _, quantized, _, _ = self.vq_in(x)
+            x = quantized
         # normalize
         # x = self.normalize(x)
 
@@ -358,6 +369,17 @@ def _resnet(arch, block, layers, pretrained, progress, **kwargs):
     #     model.load_state_dict(state_dict)
     return model
 
+
+def multi_bn_vq_resnet18(pretrained=False, progress=True, **kwargs):
+    r"""ResNet-18 model from
+    `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_
+
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress, vq_in=True,
+                   **kwargs)
 
 def multi_bn_resnet18(pretrained=False, progress=True, **kwargs):
     r"""ResNet-18 model from
@@ -537,6 +559,74 @@ def wide_resnet101_2(pretrained=False, progress=True, **kwargs):
 
 #         return x
 
+
+class VectorQuantizerEMA(nn.Module):
+    def __init__(self, num_embeddings, embedding_dim, commitment_cost, decay, epsilon=1e-5):
+        super(VectorQuantizerEMA, self).__init__()
+
+        self._embedding_dim = embedding_dim
+        self._num_embeddings = num_embeddings
+
+        self._embedding = nn.Embedding(self._num_embeddings, self._embedding_dim)
+        self._embedding.weight.data.normal_()
+        self._commitment_cost = commitment_cost
+
+        self.register_buffer('_ema_cluster_size', torch.zeros(num_embeddings))
+        self._ema_w = nn.Parameter(torch.Tensor(num_embeddings, self._embedding_dim))
+        self._ema_w.data.normal_()
+
+        self._decay = decay
+        self._epsilon = epsilon
+
+    def forward(self, inputs):
+        # convert inputs from BCHW -> BHWC
+        inputs = inputs.permute(0, 2, 3, 1).contiguous()
+        input_shape = inputs.shape
+
+        # Flatten input
+        flat_input = inputs.view(-1, self._embedding_dim)
+
+        # Calculate distances
+        distances = (torch.sum(flat_input ** 2, dim=1, keepdim=True)
+                     + torch.sum(self._embedding.weight ** 2, dim=1)
+                     - 2 * torch.matmul(flat_input, self._embedding.weight.t()))
+
+        # Encoding
+        encoding_indices = torch.argmin(distances, dim=1).unsqueeze(1)
+        encodings = torch.zeros(encoding_indices.shape[0], self._num_embeddings,
+                                device=inputs.device)
+        encodings.scatter_(1, encoding_indices, 1)
+
+        # Quantize and unflatten
+        quantized = torch.matmul(encodings, self._embedding.weight).view(input_shape)
+
+        # Use EMA to update the embedding vectors
+        if self.training:
+            self._ema_cluster_size = self._ema_cluster_size * self._decay + \
+                                     (1 - self._decay) * torch.sum(encodings, 0)
+
+            # Laplace smoothing of the cluster size
+            n = torch.sum(self._ema_cluster_size.data)
+            self._ema_cluster_size = (
+                    (self._ema_cluster_size + self._epsilon)
+                    / (n + self._num_embeddings * self._epsilon) * n)
+
+            dw = torch.matmul(encodings.t(), flat_input)
+            self._ema_w = nn.Parameter(self._ema_w * self._decay + (1 - self._decay) * dw)
+
+            self._embedding.weight = nn.Parameter(self._ema_w / self._ema_cluster_size.unsqueeze(1))
+
+        # Loss
+        e_latent_loss = F.mse_loss(quantized.detach(), inputs)
+        loss = self._commitment_cost * e_latent_loss
+
+        # Straight Through Estimator
+        quantized = inputs + (quantized - inputs).detach()
+        avg_probs = torch.mean(encodings, dim=0)
+        perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
+
+        # convert quantized from BHWC -> BCHW
+        return loss, quantized.permute(0, 3, 1, 2).contiguous(), perplexity, encodings
 
 
 class CrossTrainingBN_clean(nn.Module):

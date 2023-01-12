@@ -15,7 +15,7 @@ import numpy as np
 from models.wideresnet import *
 # from models.resnet import ResNet18, test
 # from models.resnet_multi_bn import multi_bn_resnet18
-from models.resnet_multi_bn_default_pgd import multi_bn_resnet18, multi_bn_resnet50
+from models.resnet_multi_bn_default_pgd import multi_bn_resnet18, multi_bn_resnet50, multi_bn_vq_resnet18
 
 # from models.resnet_bn_change_AlwaysUseBNofCE import ResNet18_always_use_bn_of_ce
 # MODEL_LIST = {
@@ -234,7 +234,8 @@ def main():
                         "trades_ae2gt_cat",
 
                         "trades_bat_loss",
-                        "trades_mid_step5_loss"
+                        "trades_mid_step5_loss",
+                        "default_cls",
                         ]
     parser.add_argument('--training_method', default='resnet18', choices=SUPPORT_METHOD, type=str, help='Selecte training method.')
 
@@ -454,7 +455,8 @@ def main():
         architecture = multi_bn_resnet18
     elif args.architecture == "resnet50":
         architecture = multi_bn_resnet50
-    
+    elif args.architecture == "resnet18_vq_in":
+        architecture = multi_bn_vq_resnet18
     else:
         raise "Not supportted architecture!"
 
